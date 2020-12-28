@@ -3,40 +3,25 @@
 # Contact: {sunpeize, cxrfzhang}@foxmail.com
 #
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-import logging
-import math
-from typing import List
 
-import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
-from detectron2.layers import ShapeSpec
 from detectron2.modeling import META_ARCH_REGISTRY, build_backbone, detector_postprocess
-from detectron2.modeling.roi_heads import build_roi_heads
-
 from detectron2.structures import Boxes, ImageList, Instances
-from detectron2.utils.logger import log_first_n
-from fvcore.nn import giou_loss, smooth_l1_loss
 
 from .loss import SetCriterion, HungarianMatcher
 from .head import DynamicHead
-from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
-from .util.misc import (NestedTensor, nested_tensor_from_tensor_list,
-                       accuracy, get_world_size, interpolate,
-                       is_dist_avail_and_initialized)
+from .box_ops import box_xyxy_to_cxcywh
+
 
 __all__ = ["SparseRCNN"]
 
 
 @META_ARCH_REGISTRY.register()
 class SparseRCNN(nn.Module):
-    """
-    Implement SparseRCNN
-    """
-
+    """Implement SparseRCNN"""
     def __init__(self, cfg):
         super().__init__()
 
@@ -54,10 +39,7 @@ class SparseRCNN(nn.Module):
         
         # Build Proposals.
         self.init_proposal_features = nn.Embedding(self.num_proposals, self.hidden_dim)
-        self.init_proposal_boxes = nn.Embedding(self.num_proposals, 4)
-        nn.init.constant_(self.init_proposal_boxes.weight[:, :2], 0.5)
-        nn.init.constant_(self.init_proposal_boxes.weight[:, 2:], 1.0)
-        
+
         # Build Dynamic Head.
         self.head = DynamicHead(cfg=cfg, roi_input_shape=self.backbone.output_shape())
 
@@ -70,12 +52,18 @@ class SparseRCNN(nn.Module):
         self.use_focal = cfg.MODEL.SparseRCNN.USE_FOCAL
 
         # Build Criterion.
-        matcher = HungarianMatcher(cfg=cfg,
-                                   cost_class=class_weight, 
-                                   cost_bbox=l1_weight, 
-                                   cost_giou=giou_weight,
-                                   use_focal=self.use_focal)
-        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight}
+        matcher = HungarianMatcher(
+            cfg=cfg,
+            cost_class=class_weight, 
+            cost_bbox=l1_weight, 
+            cost_giou=giou_weight,
+            use_focal=self.use_focal
+        )
+        weight_dict = {
+            "loss_ce": class_weight, 
+            "loss_bbox": l1_weight, 
+            "loss_giou": giou_weight
+        }
         if self.deep_supervision:
             aux_weight_dict = {}
             for i in range(self.num_heads - 1):
@@ -84,19 +72,20 @@ class SparseRCNN(nn.Module):
 
         losses = ["labels", "boxes"]
 
-        self.criterion = SetCriterion(cfg=cfg,
-                                      num_classes=self.num_classes,
-                                      matcher=matcher,
-                                      weight_dict=weight_dict,
-                                      eos_coef=no_object_weight,
-                                      losses=losses,
-                                      use_focal=self.use_focal)
+        self.criterion = SetCriterion(
+            cfg=cfg,
+            num_classes=self.num_classes,
+            matcher=matcher,
+            weight_dict=weight_dict,
+            eos_coef=no_object_weight,
+            losses=losses,
+            use_focal=self.use_focal
+        )
 
         pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(self.device).view(3, 1, 1)
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
         self.to(self.device)
-
 
     def forward(self, batched_inputs):
         """
@@ -113,32 +102,32 @@ class SparseRCNN(nn.Module):
                 * "height", "width" (int): the output resolution of the model, used in inference.
                   See :meth:`postprocess` for details.
         """
-        images, images_whwh = self.preprocess_image(batched_inputs)
-        if isinstance(images, (list, torch.Tensor)):
-            images = nested_tensor_from_tensor_list(images)
+        images, images_xywh = self.preprocess_image(batched_inputs)
 
         # Feature Extraction.
         src = self.backbone(images.tensor)
-        features = list()        
+        features = list()
         for f in self.in_features:
             feature = src[f]
             features.append(feature)
 
         # Prepare Proposals.
-        proposal_boxes = self.init_proposal_boxes.weight.clone()
-        proposal_boxes = box_cxcywh_to_xyxy(proposal_boxes)
-        proposal_boxes = proposal_boxes[None] * images_whwh[:, None, :]
+        proposal_boxes = images_xywh[:, None, :].repeat(1, self.num_proposals, 1)
 
         # Prediction.
-        outputs_class, outputs_coord = self.head(features, proposal_boxes, self.init_proposal_features.weight)
+        outputs_class, outputs_coord = self.head(
+            features, proposal_boxes, self.init_proposal_features.weight
+        )
         output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
 
         if self.training:
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
             targets = self.prepare_targets(gt_instances)
             if self.deep_supervision:
-                output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b}
-                                         for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+                output['aux_outputs'] = [
+                    {'pred_logits': a, 'pred_boxes': b}
+                    for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
+                ]
 
             loss_dict = self.criterion(output, targets)
             weight_dict = self.criterion.weight_dict
@@ -153,7 +142,9 @@ class SparseRCNN(nn.Module):
             results = self.inference(box_cls, box_pred, images.image_sizes)
 
             processed_results = []
-            for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
+            for results_per_image, input_per_image, image_size in zip(
+                    results, batched_inputs, images.image_sizes
+            ):
                 height = input_per_image.get("height", image_size[0])
                 width = input_per_image.get("width", image_size[1])
                 r = detector_postprocess(results_per_image, height, width)
@@ -208,8 +199,8 @@ class SparseRCNN(nn.Module):
                 result = Instances(image_size)
                 scores_per_image, topk_indices = scores_per_image.flatten(0, 1).topk(100, sorted=False)
                 labels_per_image = labels[topk_indices]
-                box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1).view(-1, 4)
-                box_pred_per_image = box_pred_per_image[topk_indices]
+                box_pred_per_image = box_pred_per_image.view(-1, 1, 4).repeat(1, self.num_classes, 1)
+                box_pred_per_image = box_pred_per_image.view(-1, 4)[topk_indices]
 
                 result.pred_boxes = Boxes(box_pred_per_image)
                 result.scores = scores_per_image
@@ -238,10 +229,10 @@ class SparseRCNN(nn.Module):
         images = [self.normalizer(x["image"].to(self.device)) for x in batched_inputs]
         images = ImageList.from_tensors(images, self.size_divisibility)
 
-        images_whwh = list()
+        images_xywh = list()
         for bi in batched_inputs:
             h, w = bi["image"].shape[-2:]
-            images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
-        images_whwh = torch.stack(images_whwh)
+            images_xywh.append(torch.tensor([0, 0, w, h], dtype=torch.float32, device=self.device))
+        images_xywh = torch.stack(images_xywh)
 
-        return images, images_whwh
+        return images, images_xywh
