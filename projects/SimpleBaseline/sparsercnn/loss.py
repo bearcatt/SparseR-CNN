@@ -15,7 +15,7 @@ from scipy.optimize import linear_sum_assignment
 
 from detectron2.utils.comm import get_world_size
 
-from .box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+from .box_ops import generalized_box_iou
 
 
 @torch.no_grad()
@@ -134,12 +134,6 @@ class SetCriterion(nn.Module):
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
-
-    def _get_tgt_permutation_idx(self, indices):
-        # permute targets following indices
-        batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
-        return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
@@ -284,7 +278,6 @@ class HungarianMatcher(nn.Module):
         cost_bbox = torch.cdist(out_bbox_, tgt_bbox_, p=1)
 
         # Compute the giou cost betwen boxes
-        # cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
         cost_giou = -generalized_box_iou(out_bbox, tgt_bbox)
 
         # Final cost matrix
