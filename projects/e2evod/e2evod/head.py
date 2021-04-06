@@ -1,6 +1,5 @@
 #
-# Modified by Peize Sun, Rufeng Zhang
-# Contact: {sunpeize, cxrfzhang}@foxmail.com
+# Modified by Chaorui Deng
 #
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 """
@@ -18,7 +17,6 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 
-from detectron2.layers import Conv2d
 from detectron2.modeling.poolers import ROIPooler
 from detectron2.structures import Boxes
 
@@ -43,11 +41,9 @@ class DynamicHead(nn.Module):
         self.return_intermediate = cfg.MODEL.SparseRCNN.DEEP_SUPERVISION
 
         # Init parameters.
-        self.use_focal = cfg.MODEL.SparseRCNN.USE_FOCAL
         self.num_classes = num_classes
-        if self.use_focal:
-            prior_prob = cfg.MODEL.SparseRCNN.PRIOR_PROB
-            self.bias_value = -math.log((1 - prior_prob) / prior_prob)
+        prior_prob = cfg.MODEL.SparseRCNN.PRIOR_PROB
+        self.bias_value = -math.log((1 - prior_prob) / prior_prob)
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -57,9 +53,8 @@ class DynamicHead(nn.Module):
                 nn.init.xavier_uniform_(p)
 
             # initialize the bias for focal loss.
-            if self.use_focal:
-                if p.shape[-1] == self.num_classes:
-                    nn.init.constant_(p, self.bias_value)
+            if p.shape[-1] == self.num_classes:
+                nn.init.constant_(p, self.bias_value)
 
     @staticmethod
     def _init_box_pooler(cfg, input_shape):
@@ -125,6 +120,9 @@ class RCNNHead(nn.Module):
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.inst_interact = DynamicConv(cfg)
 
+        # TODO Build Transformer
+        # self.transformer = 
+
         self.ffn = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
             nn.ReLU(inplace=True),
@@ -171,11 +169,7 @@ class RCNNHead(nn.Module):
             self.roi_head = None
 
         # pred.
-        self.use_focal = cfg.MODEL.SparseRCNN.USE_FOCAL
-        if self.use_focal:
-            self.class_logits = nn.Linear(d_model, num_classes)
-        else:
-            self.class_logits = nn.Linear(d_model, num_classes + 1)
+        self.class_logits = nn.Linear(d_model, num_classes)
         self.bboxes_delta = nn.Linear(d_model, 4)
         self.d_model = d_model
 
@@ -194,7 +188,7 @@ class RCNNHead(nn.Module):
         roi_features = pooler(features, proposal_boxes)
         if self.roi_head is not None:
             roi_features = self.roi_head(roi_features)
-        roi_features = roi_features.view(N * nr_boxes, self.d_model, -1).permute(2, 0, 1)
+        roi_features = roi_features.view(N * nr_boxes, roi_features.size(1), -1).permute(2, 0, 1)
 
         # self_att.
         pro_features = pro_features.view(N, nr_boxes, self.d_model).permute(1, 0, 2)
@@ -208,6 +202,8 @@ class RCNNHead(nn.Module):
         pro_features2 = self.inst_interact(pro_features, roi_features)
         pro_features = pro_features + self.dropout2(pro_features2)
         obj_features = self.norm2(pro_features)
+
+        # temporal_att. TODO
 
         # obj_feature.
         obj_features2 = self.ffn(obj_features)

@@ -7,7 +7,7 @@
 from detectron2.config import CfgNode as CN
 
 
-def add_sparsercnn_config(cfg):
+def add_e2evid_config(cfg):
     """
     Add config for SparseRCNN.
     """
@@ -37,7 +37,6 @@ def add_sparsercnn_config(cfg):
     cfg.MODEL.SparseRCNN.NO_OBJECT_WEIGHT = 0.1
 
     # Focal Loss.
-    cfg.MODEL.SparseRCNN.USE_FOCAL = True
     cfg.MODEL.SparseRCNN.ALPHA = 0.25
     cfg.MODEL.SparseRCNN.GAMMA = 2.0
     cfg.MODEL.SparseRCNN.PRIOR_PROB = 0.01
